@@ -4,6 +4,8 @@ from textual.widgets import Static
 class BerkeliumCLI(App):
     """A simple Textual app."""
 
+    CSS_PATH = "styles.tcss"
+
     def compose(self):
         self.static = Static("Hello, World!", classes="message")
         yield self.static
