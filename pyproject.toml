@@ -1,5 +1,5 @@
 [project]
-name = "berkelium-cli"
+name = "berkelium"
 version = "0.0.1"
 description = "Berkelium CLI — TUI for code graph management."
 license = "MIT"
