@@ -1,3 +1,13 @@
-.message {
+.bkc-title {
+    width: 100%;
+    background: black;
+}
+
+.bkc-subtitle {
     color: black;
+    background: #e6a08f;
+    text-align: center;
+    padding-top: 1;
+    padding-bottom: 1;
+    margin-bottom: 1;
 }

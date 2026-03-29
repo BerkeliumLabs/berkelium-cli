@@ -1,21 +1,34 @@
 from textual.app import App
 from textual.widgets import Static
+from textual_pyfiglet import FigletWidget
+
 
 class BerkeliumCLI(App):
-    """A simple Textual app."""
+    """Berkelium CLI app"""
+
+    TITLE = "Berkelium CLI"
+    SUB_TITLE = "Context Engineering Tool"
 
     CSS_PATH = "styles.tcss"
 
     def compose(self):
-        self.static = Static("Hello, World!", classes="message")
+        yield FigletWidget(
+            "Berkelium CLI",
+            font="ansi_shadow",
+            justify="center",
+            colors=["#e6a08f", "#e05d38"],
+            animate=True,
+            classes="bkc-title",
+        )
+        self.static = Static("Context Engineering Tool", classes="bkc-subtitle")
         yield self.static
 
     def on_mount(self):
-        self.static.styles.background = "orange"
+        self.static.styles.background = "#e6a08f"
 
 
 def main():
-    """Run the BerkeliumCLI app."""
+    """Run the Berkelium CLI app."""
     app = BerkeliumCLI()
     app.run()
 
