@@ -115,6 +115,60 @@ def _build_edge_info(source_qname: str, edge: dict) -> "EdgeInfo":
 
 
 # ---------------------------------------------------------------------------
+# .gitignore helper
+# ---------------------------------------------------------------------------
+
+_GITIGNORE_BLOCK = "# Berkelium CLI\n.berkelium/\n"
+_GITIGNORE_MARKER = ".berkelium/"
+
+
+def _ensure_gitignore(store_dir: Path) -> None:
+    """
+    Ensure the repo's .gitignore (or store_dir's .gitignore) contains an
+    entry to ignore the .berkelium/ directory.
+
+    Walks up from *store_dir* to find the nearest .gitignore (stopping at the
+    filesystem root or the first .git directory).  If no .gitignore exists,
+    one is created next to the .git directory (or next to *store_dir* as a
+    fallback).  The block is only appended when the marker is not already
+    present, so repeated calls are idempotent.
+    """
+    try:
+        gitignore_path = _find_or_choose_gitignore(store_dir)
+        if gitignore_path.exists():
+            content = gitignore_path.read_text(encoding="utf-8")
+            if _GITIGNORE_MARKER in content:
+                return  # already present
+            separator = "" if content.endswith("\n") else "\n"
+            gitignore_path.write_text(
+                content + separator + _GITIGNORE_BLOCK, encoding="utf-8"
+            )
+        else:
+            gitignore_path.write_text(_GITIGNORE_BLOCK, encoding="utf-8")
+        logger.debug("Updated .gitignore at '%s'", gitignore_path)
+    except Exception as exc:
+        logger.warning("Could not update .gitignore: %s", exc)
+
+
+def _find_or_choose_gitignore(start: Path) -> Path:
+    """
+    Walk up from *start* looking for an existing .gitignore or a .git dir.
+    Returns the path where .gitignore should live.
+    """
+    current = start.resolve()
+    while True:
+        if (current / ".gitignore").exists():
+            return current / ".gitignore"
+        if (current / ".git").exists():
+            return current / ".gitignore"
+        parent = current.parent
+        if parent == current:
+            # Reached filesystem root — fall back to placing it next to the store
+            return start / ".gitignore"
+        current = parent
+
+
+# ---------------------------------------------------------------------------
 # Main store class
 # ---------------------------------------------------------------------------
 
@@ -156,6 +210,7 @@ class GraphQLiteStore:
                 raise RuntimeError(
                     f"Cannot create store directory '{resolved.parent}': {exc}"
                 ) from exc
+            _ensure_gitignore(resolved.parent)
 
         try:
             self._graph: Graph = Graph(str(resolved))
