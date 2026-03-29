@@ -72,7 +72,7 @@ class BerkeliumCLI(App):
             classes="bkc-title",
         )
         yield Static(
-            f"Context Engineering Tool V{version} (Experimental)",
+            f"V{version} (Beta)",
             classes="bkc-subtitle",
         )
 
