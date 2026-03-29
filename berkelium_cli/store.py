@@ -381,6 +381,48 @@ class GraphQLiteStore:
             )
             return [], []
 
+    def get_all_nodes(self, exclude_external: bool = True) -> list["NodeInfo"]:
+        """
+        Return ALL nodes in the store for building a full definition_index.
+
+        Used by IncrementalSync so newly-parsed call_sites can resolve against
+        unchanged files that are already in the store.
+
+        Args:
+            exclude_external: If True (default), skip External placeholder nodes
+                              since they are not real definitions.
+
+        Returns:
+            List of NodeInfo objects. Returns [] on any error.
+        """
+        try:
+            where = "WHERE n.kind <> 'External'" if exclude_external else ""
+            results = self._graph.query(
+                f"""
+                MATCH (n) {where}
+                RETURN n.qualified_name AS qualified_name,
+                       n.name          AS name,
+                       n.kind          AS kind,
+                       n.language      AS language,
+                       n.file_path     AS file_path,
+                       n.line_start    AS line_start,
+                       n.line_end      AS line_end,
+                       n.file_hash     AS file_hash
+                """
+            )
+            nodes = []
+            for row in results:
+                if row.get("qualified_name"):
+                    try:
+                        nodes.append(_build_node_info_from_row(row))
+                    except Exception as exc:
+                        logger.debug("get_all_nodes: skip bad row: %s", exc)
+            logger.debug("get_all_nodes: loaded %d nodes", len(nodes))
+            return nodes
+        except Exception as exc:
+            logger.warning("get_all_nodes failed: %s", exc)
+            return []
+
     # ------------------------------------------------------------------
     # Impact analysis
     # ------------------------------------------------------------------
