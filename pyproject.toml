@@ -33,11 +33,14 @@ dependencies = [
 ]
 
 [project.scripts]
-berkelium-cli = "berkelium_cli.run:main"
+berkelium = "berkelium_cli.run:main"
 berkelium-mcp = "berkelium_cli.mcp_server:main"
 
 [tool.uv]
 package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["berkelium_cli"]
 
 [build-system]
 requires = ["hatchling"]
