@@ -414,6 +414,28 @@ class GraphQLiteStore:
             )
             return []
 
+    def query(self, cypher: str, params: dict | None = None) -> list[dict]:
+        """
+        Execute a raw Cypher query against the store.
+
+        This is the public escape hatch for advanced consumers (e.g. the
+        ``SurgicalRetriever``) that need to run custom traversals.  Errors
+        are caught, logged, and an empty list is returned so callers can
+        degrade gracefully.
+
+        Args:
+            cypher: A Cypher query string.  Use ``$param`` placeholders.
+            params: Optional dict of parameter bindings.
+
+        Returns:
+            List of result row dicts, or ``[]`` on any error.
+        """
+        try:
+            return list(self._graph.query(cypher, params=params or {}))
+        except Exception as exc:
+            logger.warning("Cypher query failed: %s", exc)
+            return []
+
     # ------------------------------------------------------------------
     # Graph algorithms
     # ------------------------------------------------------------------
