@@ -10,7 +10,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Generator
+from typing import TYPE_CHECKING, Callable, Generator
 
 if TYPE_CHECKING:
     from berkelium_cli.store import GraphQLiteStore
@@ -222,12 +222,14 @@ class CodebaseExtractor:
         skip_dirs: frozenset[str] | None = None,
         max_file_size: int = MAX_FILE_SIZE_BYTES,
         store: "GraphQLiteStore | None" = None,
+        progress_callback: Callable[[str, int, int], None] | None = None,
     ) -> None:
         self.root_path = Path(root_path).resolve()
         self.max_workers = max_workers
         self.skip_dirs = skip_dirs if skip_dirs is not None else SKIP_DIRS
         self.max_file_size = max_file_size
         self.store = store
+        self._progress_callback = progress_callback
 
     # ------------------------------------------------------------------
     # Public API
@@ -283,6 +285,8 @@ class CodebaseExtractor:
             )
 
         # Pass 1: parallel file processing (only new / changed files)
+        _total_to_parse = len(files_to_process)
+        _completed = 0
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             futures = {
                 pool.submit(self._process_file, fp, lang, file_hash): fp
@@ -293,6 +297,9 @@ class CodebaseExtractor:
                 try:
                     nodes, edges, call_sites, import_map = future.result()
                     rel = str(fp.relative_to(self.root_path)).replace(os.sep, "/")
+                    _completed += 1
+                    if self._progress_callback:
+                        self._progress_callback(rel, _completed, _total_to_parse)
 
                     # Persist the freshly-parsed file data (non-CALLS edges only;
                     # CALLS edges are resolved in pass 2 and stored separately).

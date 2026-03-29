@@ -35,7 +35,7 @@ import logging
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from berkelium_cli.store import GraphQLiteStore
@@ -178,7 +178,11 @@ class IncrementalSync:
     # Public API
     # ------------------------------------------------------------------
 
-    def sync(self, base_ref: str = "HEAD") -> SyncResult:
+    def sync(
+        self,
+        base_ref: str = "HEAD",
+        progress_callback: Callable[[str, int, int], None] | None = None,
+    ) -> SyncResult:
         """
         Run an incremental sync against *base_ref*.
 
@@ -221,7 +225,8 @@ class IncrementalSync:
         all_call_sites: list = []
         all_import_maps: dict[str, dict[str, str]] = {}
 
-        for rel_path in delta.all_to_process:
+        _total_to_process = len(delta.all_to_process)
+        for _idx, rel_path in enumerate(delta.all_to_process, start=1):
             file_path = self.root / rel_path
 
             # Resolve (validate existence, size, hash, language) before touching store
@@ -250,6 +255,8 @@ class IncrementalSync:
             result.files_parsed += 1
             all_call_sites.extend(call_sites)
             all_import_maps[rel_path] = import_map
+            if progress_callback:
+                progress_callback(rel_path, _idx, _total_to_process)
 
         # Step 4: load full definition_index from store (includes unchanged files)
         all_nodes = self.store.get_all_nodes()
