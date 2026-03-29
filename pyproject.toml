@@ -1,6 +1,6 @@
 [project]
 name = "berkelium"
-version = "0.0.2"
+version = "0.1.0"
 description = "Berkelium CLI — TUI for code graph management."
 license = "MIT"
 authors = [{ name = "Buddhi Kavindra", email = "info@buddhilive.com" }]
