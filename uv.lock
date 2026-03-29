@@ -136,6 +136,7 @@ name = "berkelium-cli"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "graphqlite" },
     { name = "textual", extra = ["syntax"] },
     { name = "tree-sitter" },
     { name = "tree-sitter-language-pack" },
@@ -149,6 +150,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "graphqlite", specifier = ">=0.4.0" },
     { name = "textual", extras = ["syntax"], specifier = ">=8.2.0" },
     { name = "tree-sitter", specifier = ">=0.25.2" },
     { name = "tree-sitter-language-pack", specifier = ">=1.3.3" },
@@ -268,6 +270,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/89/76/c615883b7b521ead2944bb3480398cbb07e12b7b4e4d073d3752eb721558/frozenlist-1.8.0-cp314-cp314t-win_amd64.whl", hash = "sha256:06be8f67f39c8b1dc671f5d83aaefd3358ae5cdcf8314552c57e7ed3e6475bdd", size = 49451, upload-time = "2025-10-06T05:37:53.425Z" },
     { url = "https://files.pythonhosted.org/packages/e0/a3/5982da14e113d07b325230f95060e2169f5311b1017ea8af2a29b374c289/frozenlist-1.8.0-cp314-cp314t-win_arm64.whl", hash = "sha256:102e6314ca4da683dca92e3b1355490fed5f313b768500084fbe6371fddfdb79", size = 42507, upload-time = "2025-10-06T05:37:54.513Z" },
     { url = "https://files.pythonhosted.org/packages/9a/9a/e35b4a917281c0b8419d4207f4334c8e8c5dbf4f3f5f9ada73958d937dcc/frozenlist-1.8.0-py3-none-any.whl", hash = "sha256:0c18a16eab41e82c295618a77502e17b195883241c563b00f0aa5106fc4eaa0d", size = 13409, upload-time = "2025-10-06T05:38:16.721Z" },
+]
+
+[[package]]
+name = "graphqlite"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/31/16/cb73ec5954ac88fcc671b62bd048fab4d3d0f49a5e19f50b6313da232443/graphqlite-0.4.0.tar.gz", hash = "sha256:f238fd7d05fbe520a93e7a8e9b62da0c9a5fd056d68d6f69bbd84824b18ed75e", size = 459018, upload-time = "2026-03-28T03:18:18.906Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a1/8d/356e251d5368fc7e8a4ec7920dfe3664c68d5f5fba2eb1e682c94b24ebe7/graphqlite-0.4.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:6df86f83b5303246aea8c972b4913e8aa4eb78308c22213e9945ec161e4a0067", size = 175037, upload-time = "2026-03-28T03:18:13.803Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/ac/6af78922df6519a59cbf49cc7f66cf6c3fb7dec3f58d7635ba5c181f561b/graphqlite-0.4.0-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:998aeda06fd2ecbf4ffa62d70b5ef4b5bbddf78cc3122766fc2ed5fa50af791a", size = 227673, upload-time = "2026-03-28T03:18:14.788Z" },
+    { url = "https://files.pythonhosted.org/packages/d1/2c/9201fc947915df2251ad69747273e3f41e48aca742ff5bbd067296b8488b/graphqlite-0.4.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:62c03c5914dd45b6b2cc30a97db7bbb5cba9e468e9035aa72ad03fdede936b04", size = 225917, upload-time = "2026-03-28T03:18:16.02Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/87/d1f67d6d3e2c6a97fd12f8ce90bfbe473c87120f697a8f29b309dde67110/graphqlite-0.4.0-py3-none-win_amd64.whl", hash = "sha256:ab19ff417638ffe67b919d25244a53959e4a1d6539f52604b961c9b934288eb8", size = 1251733, upload-time = "2026-03-28T03:18:17.654Z" },
 ]
 
 [[package]]

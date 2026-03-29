@@ -4,12 +4,16 @@ and produces a normalized graph of NodeInfo (definitions) and EdgeInfo (relation
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Generator
+from typing import TYPE_CHECKING, Generator
+
+if TYPE_CHECKING:
+    from berkelium_cli.store import GraphQLiteStore
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +150,7 @@ class NodeInfo:
     line_start: int     # 1-indexed
     line_end: int       # 1-indexed
     language: str
+    file_hash: str = "" # MD5 hex digest of the source file; used for incremental cache
 
 
 @dataclass
@@ -183,6 +188,18 @@ class _FileContext:
 
 
 # ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+def _compute_file_hash(file_path: Path) -> str:
+    """Return the MD5 hex digest of *file_path*'s contents, or '' on error."""
+    try:
+        return hashlib.md5(file_path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Main extractor class
 # ---------------------------------------------------------------------------
 
@@ -204,11 +221,13 @@ class CodebaseExtractor:
         max_workers: int = 4,
         skip_dirs: frozenset[str] | None = None,
         max_file_size: int = MAX_FILE_SIZE_BYTES,
+        store: "GraphQLiteStore | None" = None,
     ) -> None:
         self.root_path = Path(root_path).resolve()
         self.max_workers = max_workers
         self.skip_dirs = skip_dirs if skip_dirs is not None else SKIP_DIRS
         self.max_file_size = max_file_size
+        self.store = store
 
     # ------------------------------------------------------------------
     # Public API
@@ -234,20 +253,56 @@ class CodebaseExtractor:
         all_call_sites: list[_CallSite] = []
         all_import_maps: dict[str, dict[str, str]] = {}
 
-        # Pass 1: parallel file processing
+        # Pre-pass: compute file hashes and decide cache-hit vs re-parse.
+        # Files with a matching hash in the store are loaded from the DB;
+        # all others are queued for pass-1 parsing.
+        files_to_process: dict[Path, tuple[str, str]] = {}  # fp → (lang, hash)
+        cached_count = 0
+
+        for fp, lang in file_language_map.items():
+            rel = str(fp.relative_to(self.root_path)).replace(os.sep, "/")
+            file_hash = _compute_file_hash(fp)
+            if self.store is not None and self.store.has_file_cached(rel, file_hash):
+                cached_nodes, cached_edges = self.store.get_file_data(rel)
+                all_nodes.extend(cached_nodes)
+                all_edges.extend(cached_edges)
+                # Note: import maps for cached files are not available, so
+                # CALLS edges originating from those files won't be re-resolved
+                # this run (known v1 limitation).
+                cached_count += 1
+                logger.debug("Cache hit: skipping parse for '%s' (hash=%s)", rel, file_hash)
+            else:
+                if self.store is not None:
+                    self.store.delete_file_data(rel)
+                files_to_process[fp] = (lang, file_hash)
+
+        if cached_count:
+            logger.info(
+                "Incremental: %d file(s) loaded from cache, %d to parse",
+                cached_count, len(files_to_process),
+            )
+
+        # Pass 1: parallel file processing (only new / changed files)
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             futures = {
-                pool.submit(self._process_file, fp, lang): fp
-                for fp, lang in file_language_map.items()
+                pool.submit(self._process_file, fp, lang, file_hash): fp
+                for fp, (lang, file_hash) in files_to_process.items()
             }
             for future in as_completed(futures):
                 fp = futures[future]
                 try:
                     nodes, edges, call_sites, import_map = future.result()
+                    rel = str(fp.relative_to(self.root_path)).replace(os.sep, "/")
+
+                    # Persist the freshly-parsed file data (non-CALLS edges only;
+                    # CALLS edges are resolved in pass 2 and stored separately).
+                    if self.store is not None:
+                        non_call_edges = [e for e in edges if e.kind != "CALLS"]
+                        self.store.store_file_data(nodes, non_call_edges)
+
                     all_nodes.extend(nodes)
                     all_edges.extend(edges)
                     all_call_sites.extend(call_sites)
-                    rel = str(fp.relative_to(self.root_path)).replace(os.sep, "/")
                     all_import_maps[rel] = import_map
                 except Exception:
                     logger.exception("Unexpected error processing file: %s", fp)
@@ -259,9 +314,13 @@ class CodebaseExtractor:
         call_edges = self._resolve_calls(all_call_sites, definition_index, all_import_maps)
         all_edges.extend(call_edges)
 
+        # Persist resolved CALLS edges to the store
+        if self.store is not None and call_edges:
+            self.store.store_call_edges(call_edges)
+
         logger.info(
-            "Extraction complete: %d nodes, %d edges from %d files",
-            len(all_nodes), len(all_edges), len(file_language_map),
+            "Extraction complete: %d nodes, %d edges from %d files (%d cached)",
+            len(all_nodes), len(all_edges), len(file_language_map), cached_count,
         )
         return all_nodes, all_edges
 
@@ -310,7 +369,7 @@ class CodebaseExtractor:
     # ------------------------------------------------------------------
 
     def _process_file(
-        self, file_path: Path, language: str
+        self, file_path: Path, language: str, file_hash: str = ""
     ) -> tuple[list[NodeInfo], list[EdgeInfo], list[_CallSite], dict[str, str]]:
         """Parse one file and return (nodes, edges, call_sites, import_map)."""
         try:
@@ -351,6 +410,7 @@ class CodebaseExtractor:
             line_start=1,
             line_end=line_count,
             language=language,
+            file_hash=file_hash,
         )
 
         ctx = _FileContext(
@@ -367,6 +427,11 @@ class CodebaseExtractor:
                 pass
         except Exception as exc:
             logger.warning("AST walk failed for %s: %s", file_path, exc)
+
+        # Stamp file_hash on every node produced for this file
+        if file_hash:
+            for node in ctx.all_nodes:
+                node.file_hash = file_hash
 
         return ctx.all_nodes, ctx.all_edges, ctx.call_sites, ctx.import_map
 
