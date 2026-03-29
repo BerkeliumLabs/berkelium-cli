@@ -1,45 +1,75 @@
-# Berkelium - Your AI Coding Companion ✨💻
+# Berkelium CLI
+<p align="center">
+<a href="https://pypi.org/project/berkelium/">
+    <img src="https://img.shields.io/pypi/v/berkelium?style=flat-square&logo=pypi" alt="PyPI Version">
+  </a>
+  <a href="https://pypi.org/project/berkelium/">
+    <img src="https://img.shields.io/pypi/dm/berkelium?style=flat-square" alt="PyPI Downloads">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/github/license/BerkeliumLabs/berkelium-cli?style=flat-square" alt="License">
+  </a>
+  <img src="https://img.shields.io/badge/MCP-Compatible-green?style=flat-square" alt="MCP Compatible">
+</p>
 
-![Berkelium Dev CLI](https://raw.githubusercontent.com/BerkeliumLabs/berkelium/main/public/berkelium-dev-cli.png)
+Berkelium CLI is a **Code Graph Management** tool and **Model Context Protocol (MCP)** server. It uses `tree-sitter` to parse your codebase into a structured graph stored in SQLite, enabling high-fidelity impact analysis and surgical context retrieval for AI assistants.
 
-Welcome to Berkelium, an intelligent AI assistant that lives in your terminal. Powered by Node.js, TypeScript, and the Google Gemini API, Berkelium is here to help you with your coding tasks, answer your questions, and streamline your workflow.
+## 🚀 Quick Start
 
-## What is Berkelium?
+### Installation
 
-Think of Berkelium as a smart companion that understands your code and helps you with your development tasks. Whether you need to write code, debug an issue, or simply get some information, Berkelium is here to assist you. It's like having a pair programmer available 24/7, right in your terminal.
+```bash
+# Install
+pip install berkelium
 
-## Key Features
+# Run the TUI
+berkelium-cli
+```
 
-- **Conversational AI**: Chat with Berkelium in natural language and get intelligent responses.
-- **Code Generation**: Ask Berkelium to write code snippets, functions, or even entire files.
-- **File System Interaction**: Berkelium can read, write, and search for files in your project.
+### Development Setup
+```bash
+git clone https://github.com/BerkeliumLabs/berkelium-cli
+cd berkelium-cli
+uv sync
+```
 
----
+## 🖥️ TUI Features
+The Berkelium TUI (`berkelium-cli`) provides a terminal interface for:
+- **Build/Update Graph**: Index supported languages (Python, JS/TS, Go, Java, Rust, C/C++).
+- **Incremental Sync**: Uses git-diff to update the graph in milliseconds.
+- **Exploration**: Visualize symbols and relationships directly in your terminal.
 
-## Understanding Berkelium's Output
+## 🤖 MCP Server (for AI Assistants)
+Connect Berkelium to Claude, Cursor, or any MCP-compatible client to give your AI "graph-vision" over your code.
 
-Berkelium uses a color-coding system to help you quickly identify different types of messages in your terminal.
+### Configuration (Claude Desktop)
+Add this to your `claude_config.json`:
+```json
+{
+  "mcpServers": {
+    "berkelium": {
+      "command": "berkelium-mcp",
+    }
+  }
+}
+```
 
-- 🔵 **User Prompt**: This indicates a prompt or question you've entered.
-- 🟢 **Success**: This signifies a successful AI response or the completion of a task.
-- 🟡 **Warning**: This alerts you to a potential issue or non-critical problem.
-- 🔴 **Error**: This highlights a critical error that requires your attention.
+### Available Tools
+- `build_or_update_graph`: Performs a full extraction or an incremental git-diff sync.
+- `get_impact_radius`: Analyzes functional blast radius (upstream callers and downstream dependencies).
+- `get_structural_context`: Returns Markdown-formatted context optimized for LLM injection.
+- `get_file_symbols`: Lists all symbols (functions, classes, etc.) defined in a specific file.
+- `search_symbols`: Locates symbols by name fragment across the entire codebase.
+- `query_graph`: Executes read-only Cypher queries directly against the code graph.
 
----
+### Available Prompts
+- `review_my_pr`: A guided workflow that syncs the graph, identifies changes via git, and suggests targeted tests based on impact analysis.
 
-## Getting Started
+## 🏗️ Architecture
+- **Extractor (`extractor.py`)**: Language-agnostic extraction using `tree-sitter`.
+- **Store (`store.py`)**: Persistence layer using `GraphQLite` on SQLite.
+- **Sync (`sync.py`)**: Git-based incremental synchronization logic.
+- **Retriever (`retriever.py`)**: Graph traversal algorithms for impact and context.
 
-To get started with Berkelium, you'll need to have Node.js and npm installed on your machine. Then, follow these simple steps:
-
-1.  **Install dependencies**:
-    ```bash
-    npm i -g berkelium
-    ```
-2.  **Run the CLI**:
-    ```bash
-    berkelium
-    ```
-
-> The first time you run Berkelium, it will ask you for your Google API key. You can get your key from [Google AI Studio](https://aistudio.google.com/apikey).
-
-We hope you enjoy using Berkelium\! If you have any questions or feedback, please feel free to open an issue on our [GitHub repository](https://github.com/BerkeliumLabs/berkelium).
+## 📄 License
+MIT License - see [LICENSE](LICENSE).

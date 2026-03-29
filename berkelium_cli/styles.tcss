@@ -1,0 +1,63 @@
+.bkc-title {
+    width: 100%;
+    background: black;
+}
+
+.bkc-subtitle {
+    color: black;
+    background: #e6a08f;
+    text-align: center;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+/* ── Main content area ─────────────────────────────────────────────── */
+#content-area {
+    height: auto;
+    max-height: 15;
+    margin: 1 2;
+}
+
+#no-graph-msg {
+    color: $warning;
+    text-align: center;
+    padding: 2;
+}
+
+#stats-table {
+    height: auto;
+    margin: 0 2;
+}
+
+/* ── Action button ─────────────────────────────────────────────────── */
+#action-area {
+    align: center top;
+}
+#action-btn {
+    margin: 1 2;
+    width: auto;
+}
+
+/* ── Progress area ─────────────────────────────────────────────────── */
+#progress-area {
+    display: none;
+    margin: 0 2 1 2;
+}
+
+#progress-label {
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#progress-bar {
+    width: 100%;
+}
+
+/* ── Status bar (path + git branch) ───────────────────────────────── */
+.bkc-status {
+    background: #e6a08f;
+    color: $text;
+    padding: 0 2;
+    height: 1;
+    dock: bottom;
+}

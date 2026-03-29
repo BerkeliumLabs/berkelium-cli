@@ -1,0 +1,47 @@
+[project]
+name = "berkelium-cli"
+version = "0.0.1"
+description = "Berkelium CLI — TUI for code graph management."
+license = "MIT"
+authors = [{ name = "Buddhi Kavindra", email = "info@buddhilive.com" }]
+readme = "README.md"
+requires-python = ">=3.12"
+urls.documentation = "https://github.com/BerkeliumLabs/berkelium-cli#readme"
+urls.homepage = "https://berkelium.dev"
+urls.issues = "https://github.com/BerkeliumLabs/berkelium-cli/issues"
+urls.repository = "https://github.com/BerkeliumLabs/berkelium-cli"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+dependencies = [
+    "fastmcp>=3.1.1",
+    "graphqlite>=0.4.0",
+    "textual-pyfiglet>=1.0.0",
+    "textual[syntax]>=8.2.0",
+    "tree-sitter>=0.25.2",
+    "tree-sitter-language-pack>=1.3.3",
+]
+
+[project.scripts]
+berkelium-cli = "berkelium_cli.run:main"
+berkelium-mcp = "berkelium_cli.mcp_server:main"
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=9.0.2", "textual-dev>=1.8.0"]
