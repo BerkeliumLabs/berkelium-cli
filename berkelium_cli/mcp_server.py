@@ -266,6 +266,407 @@ def get_impact_radius(
 
 
 # ---------------------------------------------------------------------------
+# Tool 3: get_structural_context
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_structural_context(
+    changed_files: list[str],
+    repo_root: str = ".",
+    depth: int = 2,
+    include_pagerank: bool = False,
+) -> str:
+    """
+    Return a Markdown-formatted structural context for a set of changed files.
+
+    Analyses the code graph to identify upstream callers ("blast radius") and
+    downstream dependencies ("implementation context"), then formats the result
+    as structured Markdown ready for direct LLM injection.
+
+    Prefer this tool over get_impact_radius for code-review and impact-analysis
+    workflows — the output includes hop distances, symbol kinds, line ranges, and
+    optional PageRank centrality scores in a format the AI can reason about without
+    further parsing.
+
+    The graph must be populated first via build_or_update_graph.
+
+    Args:
+        changed_files:    List of relative file paths (forward slashes),
+                          e.g. ["src/auth.py", "src/models/user.py"].
+        repo_root:        Path to the repository root. Defaults to ".".
+        depth:            Max CALLS hops to traverse in each direction. Default 2.
+        include_pagerank: If True, enriches results with PageRank centrality
+                          scores (adds an extra graph traversal). Default False.
+
+    Returns:
+        Markdown string with a seed-files header, upstream callers section,
+        downstream dependencies section, and optional PageRank scores.
+        Returns a plain error message string if the operation fails.
+    """
+    root = Path(repo_root).resolve()
+    if not root.exists():
+        return f"Error: repo_root '{repo_root}' does not exist."
+    if not root.is_dir():
+        return f"Error: repo_root '{repo_root}' is a file, not a directory."
+
+    if not changed_files:
+        return "No changed files provided — nothing to analyse."
+
+    db_path = root / ".berkelium" / "graph.db"
+
+    try:
+        store = GraphQLiteStore(str(db_path))
+    except RuntimeError as exc:
+        return f"Error: could not open graph store at '{db_path}': {exc}"
+
+    try:
+        if store.stats().get("node_count", 0) == 0:
+            return (
+                "Graph is empty — run build_or_update_graph first, "
+                "then call get_structural_context."
+            )
+
+        retriever = SurgicalRetriever(store=store, max_depth=depth)
+        result = retriever.get_full_impact(
+            changed_files,
+            max_depth=depth,
+            include_pagerank=include_pagerank,
+        )
+        return retriever.assemble_context(result)
+
+    except Exception as exc:
+        logger.exception("get_structural_context failed for %s", changed_files)
+        return f"Error during structural context retrieval: {exc}"
+    finally:
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# Tool 4: get_file_symbols
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_file_symbols(
+    file_path: str,
+    repo_root: str = ".",
+) -> dict:
+    """
+    List all symbols (functions, classes, etc.) defined in a source file.
+
+    Queries the code graph for all nodes belonging to the given file, returning
+    their names, kinds, and line ranges.  Useful for understanding a file's
+    public interface without reading raw source — especially for large or
+    unfamiliar files.
+
+    The graph must be populated first via build_or_update_graph.
+
+    Args:
+        file_path: Relative path to the source file (forward slashes),
+                   e.g. "src/auth.py" or "berkelium_cli/store.py".
+        repo_root: Path to the repository root. Defaults to ".".
+
+    Returns:
+        Dict with keys:
+          - "file":    the queried file path
+          - "symbols": list of {name, qualified_name, kind, line_start, line_end}
+                       sorted by line_start (ascending)
+          - "summary": human-readable count string
+          - "error":   present only when something went wrong (results may be empty)
+    """
+    root = Path(repo_root).resolve()
+    if not root.exists():
+        return {
+            "file": file_path, "symbols": [], "summary": "",
+            "error": f"repo_root '{repo_root}' does not exist.",
+        }
+
+    db_path = root / ".berkelium" / "graph.db"
+
+    try:
+        store = GraphQLiteStore(str(db_path))
+    except RuntimeError as exc:
+        return {
+            "file": file_path, "symbols": [], "summary": "",
+            "error": f"Could not open graph store at '{db_path}': {exc}",
+        }
+
+    try:
+        nodes, _edges = store.get_file_data(file_path)
+
+        # Filter out the File-level container node — only return actual symbols
+        symbols = [
+            {
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "kind": n.kind,
+                "line_start": n.line_start,
+                "line_end": n.line_end,
+            }
+            for n in nodes
+            if n.kind != "File"
+        ]
+        symbols.sort(key=lambda s: s["line_start"])
+
+        if not symbols and not any(n.kind == "File" for n in nodes):
+            summary = (
+                f"'{file_path}' was not found in the graph. "
+                "Run build_or_update_graph first, or check the file path."
+            )
+        else:
+            summary = f"Found {len(symbols)} symbol(s) in '{file_path}'."
+
+        return {"file": file_path, "symbols": symbols, "summary": summary}
+
+    except Exception as exc:
+        logger.exception("get_file_symbols failed for '%s'", file_path)
+        return {
+            "file": file_path, "symbols": [], "summary": "",
+            "error": f"Symbol lookup failed: {exc}",
+        }
+    finally:
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# Kind priority for search_symbols sorting (matches retriever._KIND_PRIORITY)
+# ---------------------------------------------------------------------------
+
+_KIND_PRIORITY: dict[str, int] = {
+    "Class":     0,
+    "Interface": 1,
+    "Function":  2,
+    "Method":    2,
+    "Test":      3,
+    "File":      4,
+}
+
+# Write-query keywords blocked by query_graph
+_WRITE_KEYWORDS = {"create", "set", "delete", "merge", "remove", "drop"}
+
+
+# ---------------------------------------------------------------------------
+# Tool 5: search_symbols
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def search_symbols(
+    name: str,
+    repo_root: str = ".",
+    kind: str = "",
+    limit: int = 30,
+) -> dict:
+    """
+    Search for symbols (functions, classes, methods) by name across the codebase.
+
+    Performs a case-insensitive substring match against all symbol names in the
+    code graph.  Use this to locate where a function or class is defined before
+    calling get_file_symbols or get_structural_context on the containing file.
+
+    Typical workflow:
+      1. search_symbols("authenticate") → find which file defines it
+      2. get_file_symbols("src/auth.py") → see all symbols in that file
+      3. get_structural_context(["src/auth.py"]) → understand blast radius
+
+    The graph must be populated first via build_or_update_graph.
+
+    Args:
+        name:      Name fragment to search for (case-insensitive substring match),
+                   e.g. "authenticate", "User", "parse_token".
+        repo_root: Path to the repository root. Defaults to ".".
+        kind:      Optional filter — one of "Function", "Class", "Method",
+                   "Interface", "Test". Empty string returns all kinds. Default "".
+        limit:     Maximum number of results to return. Default 30.
+
+    Returns:
+        Dict with keys:
+          - "matches": list of {name, qualified_name, kind, line_start, line_end}
+                       sorted by kind priority then name (alphabetical)
+          - "total":   total number of matches before the limit was applied
+          - "summary": human-readable count string
+          - "error":   present only when something went wrong
+    """
+    if not name or not name.strip():
+        return {
+            "matches": [], "total": 0,
+            "summary": "Provide a non-empty name fragment to search for.",
+        }
+
+    root = Path(repo_root).resolve()
+    if not root.exists():
+        return {
+            "matches": [], "total": 0, "summary": "",
+            "error": f"repo_root '{repo_root}' does not exist.",
+        }
+
+    db_path = root / ".berkelium" / "graph.db"
+
+    try:
+        store = GraphQLiteStore(str(db_path))
+    except RuntimeError as exc:
+        return {
+            "matches": [], "total": 0, "summary": "",
+            "error": f"Could not open graph store at '{db_path}': {exc}",
+        }
+
+    try:
+        if store.stats().get("node_count", 0) == 0:
+            return {
+                "matches": [], "total": 0,
+                "summary": "Graph is empty — run build_or_update_graph first.",
+            }
+
+        nodes = store.get_all_nodes(exclude_external=True)
+
+        needle = name.strip().lower()
+        matched = [n for n in nodes if needle in n.name.lower() and n.kind != "File"]
+
+        if kind:
+            matched = [n for n in matched if n.kind == kind]
+
+        matched.sort(key=lambda n: (_KIND_PRIORITY.get(n.kind, 99), n.name.lower()))
+
+        total = len(matched)
+        matched = matched[:limit]
+
+        results = [
+            {
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "kind": n.kind,
+                "line_start": n.line_start,
+                "line_end": n.line_end,
+            }
+            for n in matched
+        ]
+
+        summary = f"Found {total} match(es) for '{name.strip()}'"
+        if kind:
+            summary += f" (kind={kind})"
+        if total > limit:
+            summary += f" — showing first {limit}"
+        summary += "."
+
+        return {"matches": results, "total": total, "summary": summary}
+
+    except Exception as exc:
+        logger.exception("search_symbols failed for name='%s'", name)
+        return {
+            "matches": [], "total": 0, "summary": "",
+            "error": f"Symbol search failed: {exc}",
+        }
+    finally:
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# Tool 6: query_graph
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def query_graph(
+    cypher: str,
+    repo_root: str = ".",
+) -> dict:
+    """
+    Run a read-only Cypher query directly against the code knowledge graph.
+
+    Use this when the higher-level tools (search_symbols, get_file_symbols,
+    get_structural_context) cannot answer your question.  Results depend
+    entirely on what your RETURN clause specifies.
+
+    Write operations (CREATE, SET, DELETE, MERGE, REMOVE, DROP) are blocked.
+
+    Node schema — properties on every non-External node:
+      name            str   Short symbol name, e.g. "authenticate"
+      qualified_name  str   Unique ID, e.g. "src/auth.py::AuthService.authenticate"
+      kind            str   File | Function | Class | Method | Interface | Test
+      file_rel_path   str   Relative path, e.g. "src/auth.py"
+      file_path       str   Absolute path
+      line_start      int   First line of the symbol definition
+      line_end        int   Last line of the symbol definition
+      language        str   e.g. "python", "typescript", "go"
+
+    Edge schema:
+      CALLS      (caller)-[:CALLS]->(callee)   function call relationships
+      CONTAINS   (file)-[:CONTAINS]->(symbol)  symbol belongs to file
+      INHERITS   (child)-[:INHERITS]->(parent) class inheritance
+
+    Example queries:
+      MATCH (n) WHERE n.kind = 'Class' RETURN n.name, n.file_rel_path
+      MATCH (n)-[:CALLS]->(m) WHERE n.name = 'login' RETURN m.name, m.file_rel_path
+      MATCH (n) WHERE n.file_rel_path = 'src/auth.py' RETURN n.name, n.kind, n.line_start
+
+    The graph must be populated first via build_or_update_graph.
+
+    Args:
+        cypher:    A read-only Cypher query string (must contain RETURN).
+        repo_root: Path to the repository root. Defaults to ".".
+
+    Returns:
+        Dict with keys:
+          - "rows":    list of result row dicts (keys match your RETURN aliases)
+          - "count":   number of rows returned
+          - "summary": human-readable summary
+          - "error":   present only when something went wrong
+    """
+    if not cypher or not cypher.strip():
+        return {
+            "rows": [], "count": 0, "summary": "",
+            "error": "cypher query cannot be empty.",
+        }
+
+    first_word = cypher.strip().split()[0].lower()
+    if first_word in _WRITE_KEYWORDS:
+        return {
+            "rows": [], "count": 0, "summary": "",
+            "error": (
+                f"Write queries are not allowed (detected '{first_word.upper()}')."
+                " Use read-only Cypher — MATCH ... RETURN ..."
+            ),
+        }
+
+    if "return" not in cypher.lower():
+        return {
+            "rows": [], "count": 0, "summary": "",
+            "error": "Query must include a RETURN clause.",
+        }
+
+    root = Path(repo_root).resolve()
+    if not root.exists():
+        return {
+            "rows": [], "count": 0, "summary": "",
+            "error": f"repo_root '{repo_root}' does not exist.",
+        }
+
+    db_path = root / ".berkelium" / "graph.db"
+
+    try:
+        store = GraphQLiteStore(str(db_path))
+    except RuntimeError as exc:
+        return {
+            "rows": [], "count": 0, "summary": "",
+            "error": f"Could not open graph store at '{db_path}': {exc}",
+        }
+
+    try:
+        rows = store.query(cypher)
+        count = len(rows)
+        return {
+            "rows": rows,
+            "count": count,
+            "summary": f"Query returned {count} row(s).",
+        }
+    except Exception as exc:
+        logger.exception("query_graph failed for cypher: %s", cypher[:120])
+        return {
+            "rows": [], "count": 0, "summary": "",
+            "error": f"Query failed: {exc}",
+        }
+    finally:
+        store.close()
+
+
+# ---------------------------------------------------------------------------
 # Prompt: review_my_pr
 # ---------------------------------------------------------------------------
 
