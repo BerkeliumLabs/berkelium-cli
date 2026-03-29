@@ -41,16 +41,23 @@
 /* ── Progress area ─────────────────────────────────────────────────── */
 #progress-area {
     display: none;
-    margin: 0 2 1 2;
+    margin: 0 0 1 0;
+}
+
+#progress-bar-row {
+    width: 100%;
+    height: auto;
 }
 
 #progress-label {
     color: $text-muted;
     margin-bottom: 1;
+    text-align: center;
+    width: 100%;
 }
 
 #progress-bar {
-    width: 100%;
+    content-align-horizontal: center;
 }
 
 /* ── Status bar (path + git branch) ───────────────────────────────── */

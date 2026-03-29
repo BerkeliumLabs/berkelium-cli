@@ -15,7 +15,7 @@ from pathlib import Path
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, VerticalScroll
+from textual.containers import Center, Container, VerticalScroll
 from textual.widgets import Button, DataTable, ProgressBar, Static
 from textual_pyfiglet import FigletWidget
 
@@ -88,7 +88,8 @@ class BerkeliumCLI(App):
 
         with Container(id="progress-area"):
             yield Static("", id="progress-label")
-            yield ProgressBar(id="progress-bar", total=100, show_eta=False)
+            with Center(id="progress-bar-row"):
+                yield ProgressBar(id="progress-bar", total=100, show_eta=True)
 
         yield Static("", id="status-bar", classes="bkc-status")
 
