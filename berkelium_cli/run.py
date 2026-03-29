@@ -25,7 +25,7 @@ from berkelium_cli.store import GraphQLiteStore
 
 def _get_version() -> str:
     try:
-        return importlib.metadata.version("berkelium-cli")
+        return importlib.metadata.version("berkelium")
     except importlib.metadata.PackageNotFoundError:
         return "dev"
 

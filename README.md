@@ -14,7 +14,7 @@
 
 Berkelium CLI is a **Code Graph Management** tool and **Model Context Protocol (MCP)** server. It uses `tree-sitter` to parse your codebase into a structured graph stored in SQLite, enabling high-fidelity impact analysis and surgical context retrieval for AI assistants.
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
 
@@ -33,17 +33,17 @@ cd berkelium-cli
 uv sync
 ```
 
-## 🖥️ TUI Features
+## TUI Features
 The Berkelium TUI (`berkelium-cli`) provides a terminal interface for:
 - **Build/Update Graph**: Index supported languages (Python, JS/TS, Go, Java, Rust, C/C++).
 - **Incremental Sync**: Uses git-diff to update the graph in milliseconds.
 - **Exploration**: Visualize symbols and relationships directly in your terminal.
 
-## 🤖 MCP Server (for AI Assistants)
+## MCP Server (for AI Assistants)
 Connect Berkelium to Claude, Cursor, or any MCP-compatible client to give your AI "graph-vision" over your code.
 
-### Configuration (Claude Desktop)
-Add this to your `claude_config.json`:
+### Configuration (Claude)
+Add this to your `settings.json`:
 ```json
 {
   "mcpServers": {
@@ -65,11 +65,11 @@ Add this to your `claude_config.json`:
 ### Available Prompts
 - `review_my_pr`: A guided workflow that syncs the graph, identifies changes via git, and suggests targeted tests based on impact analysis.
 
-## 🏗️ Architecture
+## Architecture
 - **Extractor (`extractor.py`)**: Language-agnostic extraction using `tree-sitter`.
 - **Store (`store.py`)**: Persistence layer using `GraphQLite` on SQLite.
 - **Sync (`sync.py`)**: Git-based incremental synchronization logic.
 - **Retriever (`retriever.py`)**: Graph traversal algorithms for impact and context.
 
-## 📄 License
+## License
 MIT License - see [LICENSE](LICENSE).
