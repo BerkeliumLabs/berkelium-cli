@@ -3,7 +3,7 @@ MCP server for berkelium-cli — exposes the codebase graph to AI coding assista
 
 Provides one tool:
 
-  query_code_call_graph  — Direct read-only Cypher queries against the code graph.
+  query_search_codebase  — Direct read-only Cypher queries against the code graph.
 
 Usage (stdio transport for Claude Code / Cursor)::
 
@@ -20,6 +20,7 @@ MCP config entry (claude_desktop_config.json / .claude/settings.json)::
       }
     }
 """
+
 from __future__ import annotations
 
 import logging
@@ -41,25 +42,26 @@ mcp = FastMCP(
         "Use this server to query structural relationships in a codebase. "
         "The graph is built and maintained via the berkelium TUI — run `berkelium` "
         "to build or update it before querying. "
-        "Use query_code_call_graph with Cypher to find callers, callees, class "
+        "Use query_search_codebase with Cypher to find callers, callees, class "
         "hierarchies, and symbol locations across the codebase."
     ),
 )
 
 
 # ---------------------------------------------------------------------------
-# Write-query keywords blocked by query_code_call_graph
+# Write-query keywords blocked by query_search_codebase
 # ---------------------------------------------------------------------------
 
 _WRITE_KEYWORDS = frozenset({"create", "set", "delete", "merge", "remove", "drop"})
 
 
 # ---------------------------------------------------------------------------
-# Tool: query_code_call_graph
+# Tool: query_search_codebase
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
-def query_code_call_graph(
+def query_search_codebase(
     cypher: str,
     repo_root: str = ".",
 ) -> dict:
@@ -96,12 +98,17 @@ def query_code_call_graph(
       MATCH (a)-[:CALLS]->(b) WHERE a.name = 'login' RETURN b.name AS callee, b.file_rel_path AS file
       MATCH (n) WHERE n.file_rel_path = 'src/auth.py' RETURN n.name AS name, n.kind AS kind, n.line_start AS line
       MATCH (a)-[:INHERITS]->(b) RETURN a.name AS child, b.name AS base
+      MATCH (a)-[:INHERITS]->(b) WHERE b.name = 'MyBaseClass' RETURN a.name AS subclass, a.file_rel_path AS file
 
     Tips:
       - Always use AS aliases in RETURN — unaliased columns (e.g. RETURN n.name)
         produce keys like "n.name" in results, which are harder to consume.
-      - Use short variable names (n, a, b, src, dst) — some SQL/Cypher reserved
-        words (e.g. type, key, value) may cause parse errors as variable names.
+      - Use short variable names (n, a, b, src, dst). Many common English words
+        are reserved in the Cypher parser and WILL cause a crash if used as
+        variable names. Known reserved words: child, base, end, start, node,
+        type, key, value, index, case, when, then, else, in, is, not, and, or.
+        WRONG: MATCH (child)-[:INHERITS]->(base)  ← crashes on "child"/"base"
+        RIGHT: MATCH (a)-[:INHERITS]->(b)          ← use single-letter names
 
     The graph must be built first using the berkelium TUI (`berkelium` command).
 
@@ -120,7 +127,9 @@ def query_code_call_graph(
     # --- Validate query -----------------------------------------------------
     if not cypher or not cypher.strip():
         return {
-            "rows": [], "count": 0, "summary": "",
+            "rows": [],
+            "count": 0,
+            "summary": "",
             "error": (
                 "cypher query cannot be empty. "
                 "Provide a valid MATCH ... RETURN ... Cypher query."
@@ -132,7 +141,9 @@ def query_code_call_graph(
 
     if first_word in _WRITE_KEYWORDS:
         return {
-            "rows": [], "count": 0, "summary": "",
+            "rows": [],
+            "count": 0,
+            "summary": "",
             "error": (
                 f"Write queries are not allowed (detected '{first_word.upper()}' "
                 "as the first keyword). Use read-only Cypher — MATCH ... RETURN ..."
@@ -141,7 +152,9 @@ def query_code_call_graph(
 
     if "return" not in cypher.lower():
         return {
-            "rows": [], "count": 0, "summary": "",
+            "rows": [],
+            "count": 0,
+            "summary": "",
             "error": (
                 "Query must include a RETURN clause. "
                 "Example: MATCH (n) WHERE n.kind = 'Function' RETURN n.name AS name, n.file_rel_path AS file"
@@ -152,7 +165,9 @@ def query_code_call_graph(
     root = Path(repo_root).resolve()
     if not root.exists():
         return {
-            "rows": [], "count": 0, "summary": "",
+            "rows": [],
+            "count": 0,
+            "summary": "",
             "error": (
                 f"repo_root '{repo_root}' does not exist. "
                 "Provide an absolute path or a path relative to the current "
@@ -161,7 +176,9 @@ def query_code_call_graph(
         }
     if not root.is_dir():
         return {
-            "rows": [], "count": 0, "summary": "",
+            "rows": [],
+            "count": 0,
+            "summary": "",
             "error": (
                 f"repo_root '{repo_root}' is a file, not a directory. "
                 "Provide the path to the repository root directory."
@@ -175,7 +192,9 @@ def query_code_call_graph(
         store = GraphQLiteStore(str(db_path))
     except RuntimeError as exc:
         return {
-            "rows": [], "count": 0, "summary": "",
+            "rows": [],
+            "count": 0,
+            "summary": "",
             "error": (
                 f"Could not open graph store at '{db_path}': {exc}. "
                 "Build the graph first by running the berkelium TUI (`berkelium` command)."
@@ -186,7 +205,8 @@ def query_code_call_graph(
         # --- Guard: empty graph ---------------------------------------------
         if store.stats().get("node_count", 0) == 0:
             return {
-                "rows": [], "count": 0,
+                "rows": [],
+                "count": 0,
                 "summary": "",
                 "error": (
                     "Graph is empty. Build the graph first by running the berkelium TUI "
@@ -209,9 +229,11 @@ def query_code_call_graph(
         # Cypher parser is a native DLL that can raise SystemExit on certain
         # syntax errors.  Catching it here prevents the MCP server process from
         # dying and returning EOF to the client.
-        logger.exception("query_code_call_graph failed for cypher: %s", cypher[:200])
+        logger.exception("query_search_codebase failed for cypher: %s", cypher[:200])
         return {
-            "rows": [], "count": 0, "summary": "",
+            "rows": [],
+            "count": 0,
+            "summary": "",
             "error": (
                 f"Query failed: {exc}. "
                 "Check your Cypher syntax — use AS aliases in RETURN, avoid reserved "
@@ -226,6 +248,7 @@ def query_code_call_graph(
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     """Start the MCP server over stdio (standard transport for Claude Code / Cursor)."""
