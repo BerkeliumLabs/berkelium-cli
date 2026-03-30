@@ -222,7 +222,7 @@ class CodebaseExtractor:
         skip_dirs: frozenset[str] | None = None,
         max_file_size: int = MAX_FILE_SIZE_BYTES,
         store: "GraphQLiteStore | None" = None,
-        progress_callback: Callable[[str, int, int], None] | None = None,
+        progress_callback: Callable[[str, int, int, str], None] | None = None,
     ) -> None:
         self.root_path = Path(root_path).resolve()
         self.max_workers = max_workers
@@ -261,8 +261,12 @@ class CodebaseExtractor:
         files_to_process: dict[Path, tuple[str, str]] = {}  # fp → (lang, hash)
         cached_count = 0
 
-        for fp, lang in file_language_map.items():
+        _files_list = list(file_language_map.items())
+        _total_to_check = len(_files_list)
+        for _check_idx, (fp, lang) in enumerate(_files_list):
             rel = str(fp.relative_to(self.root_path)).replace(os.sep, "/")
+            if self._progress_callback:
+                self._progress_callback(rel, _check_idx + 1, _total_to_check, "checking_cache")
             file_hash = _compute_file_hash(fp)
             if self.store is not None and self.store.has_file_cached(rel, file_hash):
                 cached_nodes, cached_edges = self.store.get_file_data(rel)
@@ -299,7 +303,7 @@ class CodebaseExtractor:
                     rel = str(fp.relative_to(self.root_path)).replace(os.sep, "/")
                     _completed += 1
                     if self._progress_callback:
-                        self._progress_callback(rel, _completed, _total_to_parse)
+                        self._progress_callback(rel, _completed, _total_to_parse, "extracting")
 
                     # Persist the freshly-parsed file data (non-CALLS edges only;
                     # CALLS edges are resolved in pass 2 and stored separately).
@@ -318,7 +322,10 @@ class CodebaseExtractor:
         definition_index: dict[str, NodeInfo] = {n.qualified_name: n for n in all_nodes}
 
         # Pass 2: call resolution (serial)
-        call_edges = self._resolve_calls(all_call_sites, definition_index, all_import_maps)
+        call_edges = self._resolve_calls(
+            all_call_sites, definition_index, all_import_maps,
+            progress_callback=self._progress_callback,
+        )
         all_edges.extend(call_edges)
 
         # Persist resolved CALLS edges to the store
@@ -338,6 +345,8 @@ class CodebaseExtractor:
     def _detect_languages(self) -> dict[Path, str]:
         """Walk root_path and return a map of {abs_path -> language}."""
         result: dict[Path, str] = {}
+        _REPORT_EVERY = 50  # report to UI every N files found to avoid flooding
+        _found = 0
         for file_path in self.root_path.rglob("*"):
             if not file_path.is_file():
                 continue
@@ -358,6 +367,12 @@ class CodebaseExtractor:
             if suffix == ".h":
                 language = self._detect_h_dialect(file_path)
             result[file_path] = language
+            _found += 1
+            if self._progress_callback and _found % _REPORT_EVERY == 0:
+                self._progress_callback("", _found, 0, "discovering")
+        # Final report with the exact count
+        if self._progress_callback:
+            self._progress_callback("", len(result), 0, "discovering")
         return result
 
     def _detect_h_dialect(self, file_path: Path) -> str:
@@ -1095,6 +1110,7 @@ class CodebaseExtractor:
         call_sites: list[_CallSite],
         definition_index: dict[str, NodeInfo],
         import_maps: dict[str, dict[str, str]],
+        progress_callback: Callable[[str, int, int, str], None] | None = None,
     ) -> list[EdgeInfo]:
         """
         Resolve raw call sites to CALLS edges using the definition index
@@ -1109,9 +1125,15 @@ class CodebaseExtractor:
             short = qname.split("::")[-1].split(".")[-1] if "::" in qname else qname.split("/")[-1]
             name_to_qnames.setdefault(short, []).append(qname)
 
-        for site in call_sites:
+        total_sites = len(call_sites)
+        # Report at most ~100 updates regardless of call_site count to avoid flooding the UI
+        report_every = max(1, total_sites // 100)
+
+        for i, site in enumerate(call_sites):
             raw = site.raw_callee.strip()
             if not raw:
+                if progress_callback and (i % report_every == 0 or i == total_sites - 1):
+                    progress_callback(site.file_rel_path, i + 1, total_sites, "resolving_calls")
                 continue
 
             resolved = self._resolve_single_call(
@@ -1120,6 +1142,9 @@ class CodebaseExtractor:
             )
             for target in resolved:
                 edges.append(EdgeInfo(kind="CALLS", source=site.caller_qname, target=target))
+
+            if progress_callback and (i % report_every == 0 or i == total_sites - 1):
+                progress_callback(site.file_rel_path, i + 1, total_sites, "resolving_calls")
 
         return edges
 

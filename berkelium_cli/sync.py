@@ -181,7 +181,7 @@ class IncrementalSync:
     def sync(
         self,
         base_ref: str = "HEAD",
-        progress_callback: Callable[[str, int, int], None] | None = None,
+        progress_callback: Callable[[str, int, int, str], None] | None = None,
     ) -> SyncResult:
         """
         Run an incremental sync against *base_ref*.
@@ -256,7 +256,7 @@ class IncrementalSync:
             all_call_sites.extend(call_sites)
             all_import_maps[rel_path] = import_map
             if progress_callback:
-                progress_callback(rel_path, _idx, _total_to_process)
+                progress_callback(rel_path, _idx, _total_to_process, "extracting")
 
         # Step 4: load full definition_index from store (includes unchanged files)
         all_nodes = self.store.get_all_nodes()
@@ -265,7 +265,8 @@ class IncrementalSync:
         # Steps 5 & 6: resolve and store CALLS edges
         if all_call_sites:
             call_edges = self._extractor._resolve_calls(
-                all_call_sites, definition_index, all_import_maps
+                all_call_sites, definition_index, all_import_maps,
+                progress_callback=progress_callback,
             )
             if call_edges:
                 self.store.store_call_edges(call_edges)

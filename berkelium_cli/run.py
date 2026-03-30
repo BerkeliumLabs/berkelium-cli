@@ -131,8 +131,8 @@ class BerkeliumCLI(App):
         store = GraphQLiteStore(str(db_path))
         try:
 
-            def on_progress(rel_path: str, current: int, total: int) -> None:
-                self.call_from_thread(self._update_progress, rel_path, current, total)
+            def on_progress(rel_path: str, current: int, total: int, stage: str = "extracting") -> None:
+                self.call_from_thread(self._update_progress, rel_path, current, total, stage)
 
             if is_update:
                 self._worker_update(root, store, on_progress)
@@ -184,11 +184,21 @@ class BerkeliumCLI(App):
     # UI update helpers (called from main thread via call_from_thread)
     # ------------------------------------------------------------------
 
-    def _update_progress(self, rel_path: str, current: int, total: int) -> None:
+    def _update_progress(self, rel_path: str, current: int, total: int, stage: str = "extracting") -> None:
         bar = self.query_one("#progress-bar", ProgressBar)
         label = self.query_one("#progress-label", Static)
-        bar.update(total=total, progress=current)
-        label.update(f"[{current}/{total}]  {rel_path}")
+        if stage == "discovering":
+            # Total is unknown during file discovery — just update the label count.
+            label.update(f"Discovering files... ({current} found)")
+        elif stage == "checking_cache":
+            bar.update(total=total, progress=current)
+            label.update(f"Checking cache... [{current}/{total}]  {rel_path}")
+        elif stage == "resolving_calls":
+            bar.update(total=total, progress=current)
+            label.update(f"Resolving calls... [{current}/{total}]")
+        else:  # "extracting" or any future stage
+            bar.update(total=total, progress=current)
+            label.update(f"[{current}/{total}]  {rel_path}")
 
     def _update_progress_label(self, text: str) -> None:
         self.query_one("#progress-label", Static).update(text)
