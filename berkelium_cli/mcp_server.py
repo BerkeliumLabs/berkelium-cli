@@ -1,10 +1,11 @@
 """
 MCP server for berkelium-cli — exposes the codebase graph to AI coding assistants.
 
-Provides two tools and one prompt workflow:
+Provides three tools and one prompt workflow:
 
   build_or_update_graph  — Full extraction on first run; incremental git-diff sync thereafter.
-  get_impact_radius      — Blast-radius analysis (upstream callers + downstream deps).
+  analyze_impact_radius  — Pre-change static impact analysis (upstream callers + downstream deps).
+  query_code_call_graph  — Direct read-only Cypher queries against the code graph.
   review_my_pr           — Prompt workflow: sync → git diff → impact → test suggestions.
 
 Usage (stdio transport for Claude Code / Cursor)::
@@ -45,10 +46,12 @@ mcp = FastMCP(
     "berkelium-cli-server",
     instructions=(
         "Use this server to understand structural relationships in a codebase. "
-        "Always call build_or_update_graph first to ensure the graph reflects "
-        "the current state of the code on disk. "
-        "Then call get_impact_radius to discover which files and functions are "
-        "affected by a given set of changes before writing reviews or tests."
+        "Workflow: "
+        "1. Call build_or_update_graph first to sync the graph with the current code on disk. "
+        "2. Call analyze_impact_radius BEFORE proposing or applying changes — it identifies "
+        "all callers, dependencies, and affected files so you can assess risk. "
+        "3. Use query_code_call_graph for advanced Cypher queries when the above tools "
+        "are insufficient."
     ),
 )
 
@@ -68,6 +71,10 @@ def build_or_update_graph(repo_root: str = ".") -> str:
     minutes for a full rebuild.  Falls back automatically to full extraction
     when the directory is not a git repository.
 
+    Always call this tool first before analyze_impact_radius or
+    query_code_call_graph to ensure the graph reflects the current state of
+    code on disk.
+
     Args:
         repo_root: Absolute or relative path to the repository root.
                    Defaults to the current working directory (``"."``).
@@ -80,9 +87,15 @@ def build_or_update_graph(repo_root: str = ".") -> str:
     # --- Resolve and validate path ------------------------------------------
     root = Path(repo_root).resolve()
     if not root.exists():
-        return f"Error: repo_root '{repo_root}' does not exist."
+        return (
+            f"Error: repo_root '{repo_root}' does not exist. "
+            "Provide an absolute path or a path relative to the current working directory."
+        )
     if not root.is_dir():
-        return f"Error: repo_root '{repo_root}' is a file, not a directory."
+        return (
+            f"Error: repo_root '{repo_root}' is a file, not a directory. "
+            "Provide the path to the repository root directory."
+        )
 
     db_path = root / ".berkelium" / "graph.db"
 
@@ -90,7 +103,10 @@ def build_or_update_graph(repo_root: str = ".") -> str:
     try:
         store = GraphQLiteStore(str(db_path))
     except RuntimeError as exc:
-        return f"Error: could not open graph store at '{db_path}': {exc}"
+        return (
+            f"Error: could not open graph store at '{db_path}': {exc}. "
+            "Ensure the process has write permissions to the repository directory."
+        )
 
     try:
         stats = store.stats()
@@ -115,7 +131,11 @@ def _full_extract(root: Path, store: GraphQLiteStore) -> str:
         )
     except Exception as exc:
         logger.exception("Full extraction failed for '%s'", root)
-        return f"Error during full extraction of '{root}': {exc}"
+        return (
+            f"Error during full extraction of '{root}': {exc}. "
+            "Check that the directory contains supported source files "
+            "(Python, JS/TS, Go, Java, Rust, C/C++)."
+        )
 
 
 def _incremental_sync(root: Path, store: GraphQLiteStore) -> str:
@@ -127,7 +147,12 @@ def _incremental_sync(root: Path, store: GraphQLiteStore) -> str:
         syncer = IncrementalSync(root=root, store=store)
         result = syncer.sync(base_ref="HEAD")
         errors_note = (
-            f" ({len(result.errors)} non-fatal error(s))" if result.errors else ""
+            f" ({len(result.errors)} non-fatal error(s): "
+            + "; ".join(result.errors[:3])
+            + ("..." if len(result.errors) > 3 else "")
+            + ")"
+            if result.errors
+            else ""
         )
         return (
             f"Incremental sync complete for '{root}': "
@@ -144,87 +169,134 @@ def _incremental_sync(root: Path, store: GraphQLiteStore) -> str:
         return _full_extract(root, store) + " (git sync unavailable; ran full extraction)"
     except Exception as exc:
         logger.exception("Incremental sync failed unexpectedly for '%s'", root)
-        return f"Error during incremental sync of '{root}': {exc}"
+        return (
+            f"Error during incremental sync of '{root}': {exc}. "
+            "Try calling build_or_update_graph again; if the error persists, "
+            "delete '.berkelium/graph.db' to force a full rebuild."
+        )
 
 
 # ---------------------------------------------------------------------------
-# Tool 2: get_impact_radius
+# Tool 2: analyze_impact_radius
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def get_impact_radius(
-    changed_files: list[str],
+def analyze_impact_radius(
+    target_files: list[str],
     repo_root: str = ".",
     depth: int = 2,
+    include_pagerank: bool = False,
 ) -> dict:
     """
-    Analyze the functional blast radius of a set of changed files.
+    Use this tool before proposing or applying any code changes.
 
-    Traverses CALLS edges in the stored code graph to discover:
+    Performs a static analysis of the call graph to identify all upstream callers,
+    downstream dependencies, and affected files for the given target files.
+    Use this to assess risk, identify what tests need to run, and understand the
+    full impact of a planned modification before writing any code.
 
-    - **Upstream callers**: components that call into the changed files
-      (i.e. "who will break if I change this?").
-    - **Downstream dependencies**: components called by the changed files
-      (i.e. "what does my change depend on?").
+    Upstream callers  = components that call INTO the target files
+                        ("who will break if I change this?")
+    Downstream deps   = components called BY the target files
+                        ("what does my change depend on?")
 
-    The graph must be populated first via ``build_or_update_graph``.
+    The graph must be populated first via build_or_update_graph.
 
     Args:
-        changed_files: List of relative file paths using forward slashes,
-                       e.g. ``["src/auth.py", "src/models/user.py"]``.
-        repo_root:     Path to the repository root. Defaults to ``"."``.
-        depth:         Maximum number of CALLS hops to traverse in each
-                       direction.  Higher values find more transitive
-                       dependents but increase query time.  Default: 2.
+        target_files:     List of relative file paths (forward slashes) you plan
+                          to modify, e.g. ["src/auth.py", "src/models/user.py"].
+        repo_root:        Path to the repository root. Defaults to ".".
+        depth:            Max CALLS hops to traverse in each direction. Default 2.
+                          Increase to 3-4 for deeper transitive impact; decrease to
+                          1 for a quick first-hop check on large codebases.
+        include_pagerank: If True, enriches results with PageRank centrality scores
+                          to rank symbols by architectural importance. Default False.
 
     Returns:
         Dict with keys:
-
-        - ``"upstream"``:   list of ``{name, qualified_name, file, kind, distance}``
-          dicts for callers, sorted by hop distance then kind.
-        - ``"downstream"``: same structure for callees.
-        - ``"summary"``:    human-readable one-line summary.
-        - ``"error"``:      present only when a non-fatal problem occurred
-          (results may be partial).
+          - "context":        Markdown-formatted analysis ready for LLM injection.
+                              Includes hop distances, symbol kinds, and line ranges.
+          - "upstream":       List of {name, qualified_name, file, kind, distance}
+                              for callers — sorted by hop distance then kind.
+          - "downstream":     Same structure for callees / dependencies.
+          - "affected_files": Sorted list of unique file paths that will be touched.
+          - "risk_summary":   One-line risk assessment,
+                              e.g. "3 upstream caller(s), 7 downstream dep(s)".
+          - "summary":        Human-readable count summary.
+          - "error":          Present only when a non-fatal problem occurred;
+                              results may be partial.
     """
+    # --- Validate repo_root -------------------------------------------------
     root = Path(repo_root).resolve()
     if not root.exists():
         return {
-            "upstream": [], "downstream": [],
-            "summary": "",
-            "error": f"repo_root '{repo_root}' does not exist.",
+            "context": "", "upstream": [], "downstream": [],
+            "affected_files": [], "risk_summary": "", "summary": "",
+            "error": (
+                f"repo_root '{repo_root}' does not exist. "
+                "Provide an absolute path or a path relative to the current "
+                "working directory."
+            ),
+        }
+    if not root.is_dir():
+        return {
+            "context": "", "upstream": [], "downstream": [],
+            "affected_files": [], "risk_summary": "", "summary": "",
+            "error": (
+                f"repo_root '{repo_root}' is a file, not a directory. "
+                "Provide the path to the repository root directory."
+            ),
         }
 
-    if not changed_files:
+    # --- Validate target_files ----------------------------------------------
+    if not target_files:
         return {
-            "upstream": [], "downstream": [],
-            "summary": "No changed files provided — nothing to analyse.",
+            "context": "", "upstream": [], "downstream": [],
+            "affected_files": [], "risk_summary": "No files provided.",
+            "summary": (
+                "No target_files provided — nothing to analyse. "
+                "Pass a list of relative file paths you plan to modify."
+            ),
         }
+
+    # Normalise paths: strip leading slashes / backslashes, convert to forward slashes
+    normalised = [f.lstrip("/\\").replace("\\", "/") for f in target_files]
 
     db_path = root / ".berkelium" / "graph.db"
 
+    # --- Open graph store ---------------------------------------------------
     try:
         store = GraphQLiteStore(str(db_path))
     except RuntimeError as exc:
         return {
-            "upstream": [], "downstream": [],
-            "summary": "",
-            "error": f"Could not open graph store at '{db_path}': {exc}",
+            "context": "", "upstream": [], "downstream": [],
+            "affected_files": [], "risk_summary": "", "summary": "",
+            "error": (
+                f"Could not open graph store at '{db_path}': {exc}. "
+                "Run build_or_update_graph first to initialise the graph."
+            ),
         }
 
     try:
-        stats = store.stats()
-        if stats.get("node_count", 0) == 0:
+        # --- Guard: empty graph ---------------------------------------------
+        if store.stats().get("node_count", 0) == 0:
             return {
-                "upstream": [], "downstream": [],
+                "context": "", "upstream": [], "downstream": [],
+                "affected_files": [], "risk_summary": "Graph is empty.",
                 "summary": (
-                    "Graph is empty — run build_or_update_graph first."
+                    "Graph is empty — run build_or_update_graph first, then retry."
                 ),
             }
 
+        # --- Traversal ------------------------------------------------------
         retriever = SurgicalRetriever(store=store, max_depth=depth)
-        result = retriever.get_full_impact(changed_files, max_depth=depth)
+        result = retriever.get_full_impact(
+            normalised,
+            max_depth=depth,
+            include_pagerank=include_pagerank,
+        )
 
+        # --- Serialise upstream / downstream --------------------------------
         upstream = [
             {
                 "name": s.name,
@@ -232,6 +304,7 @@ def get_impact_radius(
                 "file": s.file_rel_path,
                 "kind": s.kind,
                 "distance": s.distance,
+                **({"pagerank_score": round(s.pagerank_score, 4)} if s.pagerank_score else {}),
             }
             for s in result.upstream
         ]
@@ -242,339 +315,78 @@ def get_impact_radius(
                 "file": s.file_rel_path,
                 "kind": s.kind,
                 "distance": s.distance,
+                **({"pagerank_score": round(s.pagerank_score, 4)} if s.pagerank_score else {}),
             }
             for s in result.downstream
         ]
 
+        # --- Affected files (unique, sorted) --------------------------------
+        affected_files = sorted(
+            {s["file"] for s in upstream + downstream if s["file"]}
+        )
+
+        # --- Risk summary ---------------------------------------------------
+        risk_summary = (
+            f"{len(upstream)} upstream caller(s), "
+            f"{len(downstream)} downstream dep(s) "
+            f"across {depth} hop(s) for {len(normalised)} file(s)."
+        )
+
         summary = (
-            f"Found {len(upstream)} upstream caller(s) and "
-            f"{len(downstream)} downstream dependency/dependencies "
-            f"across {depth} hop(s) for {len(changed_files)} file(s)."
+            f"Impact analysis complete: {risk_summary} "
+            f"{len(affected_files)} unique file(s) affected."
         )
 
-        return {"upstream": upstream, "downstream": downstream, "summary": summary}
+        # --- Markdown context (for direct LLM injection) --------------------
+        context = retriever.assemble_context(result)
+
+        return {
+            "context": context,
+            "upstream": upstream,
+            "downstream": downstream,
+            "affected_files": affected_files,
+            "risk_summary": risk_summary,
+            "summary": summary,
+        }
 
     except Exception as exc:
-        logger.exception("get_impact_radius failed for %s", changed_files)
+        logger.exception("analyze_impact_radius failed for %s", target_files)
         return {
-            "upstream": [], "downstream": [],
-            "summary": "",
-            "error": f"Impact analysis failed: {exc}",
+            "context": "", "upstream": [], "downstream": [],
+            "affected_files": [], "risk_summary": "", "summary": "",
+            "error": (
+                f"Impact analysis failed: {exc}. "
+                "Ensure the graph is populated (run build_or_update_graph) "
+                "and that the file paths use forward slashes relative to repo_root."
+            ),
         }
     finally:
         store.close()
 
 
 # ---------------------------------------------------------------------------
-# Tool 3: get_structural_context
+# Write-query keywords blocked by query_code_call_graph
+# ---------------------------------------------------------------------------
+
+_WRITE_KEYWORDS = frozenset({"create", "set", "delete", "merge", "remove", "drop"})
+
+
+# ---------------------------------------------------------------------------
+# Tool 3: query_code_call_graph
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def get_structural_context(
-    changed_files: list[str],
-    repo_root: str = ".",
-    depth: int = 2,
-    include_pagerank: bool = False,
-) -> str:
-    """
-    Return a Markdown-formatted structural context for a set of changed files.
-
-    Analyses the code graph to identify upstream callers ("blast radius") and
-    downstream dependencies ("implementation context"), then formats the result
-    as structured Markdown ready for direct LLM injection.
-
-    Prefer this tool over get_impact_radius for code-review and impact-analysis
-    workflows — the output includes hop distances, symbol kinds, line ranges, and
-    optional PageRank centrality scores in a format the AI can reason about without
-    further parsing.
-
-    The graph must be populated first via build_or_update_graph.
-
-    Args:
-        changed_files:    List of relative file paths (forward slashes),
-                          e.g. ["src/auth.py", "src/models/user.py"].
-        repo_root:        Path to the repository root. Defaults to ".".
-        depth:            Max CALLS hops to traverse in each direction. Default 2.
-        include_pagerank: If True, enriches results with PageRank centrality
-                          scores (adds an extra graph traversal). Default False.
-
-    Returns:
-        Markdown string with a seed-files header, upstream callers section,
-        downstream dependencies section, and optional PageRank scores.
-        Returns a plain error message string if the operation fails.
-    """
-    root = Path(repo_root).resolve()
-    if not root.exists():
-        return f"Error: repo_root '{repo_root}' does not exist."
-    if not root.is_dir():
-        return f"Error: repo_root '{repo_root}' is a file, not a directory."
-
-    if not changed_files:
-        return "No changed files provided — nothing to analyse."
-
-    db_path = root / ".berkelium" / "graph.db"
-
-    try:
-        store = GraphQLiteStore(str(db_path))
-    except RuntimeError as exc:
-        return f"Error: could not open graph store at '{db_path}': {exc}"
-
-    try:
-        if store.stats().get("node_count", 0) == 0:
-            return (
-                "Graph is empty — run build_or_update_graph first, "
-                "then call get_structural_context."
-            )
-
-        retriever = SurgicalRetriever(store=store, max_depth=depth)
-        result = retriever.get_full_impact(
-            changed_files,
-            max_depth=depth,
-            include_pagerank=include_pagerank,
-        )
-        return retriever.assemble_context(result)
-
-    except Exception as exc:
-        logger.exception("get_structural_context failed for %s", changed_files)
-        return f"Error during structural context retrieval: {exc}"
-    finally:
-        store.close()
-
-
-# ---------------------------------------------------------------------------
-# Tool 4: get_file_symbols
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-def get_file_symbols(
-    file_path: str,
-    repo_root: str = ".",
-) -> dict:
-    """
-    List all symbols (functions, classes, etc.) defined in a source file.
-
-    Queries the code graph for all nodes belonging to the given file, returning
-    their names, kinds, and line ranges.  Useful for understanding a file's
-    public interface without reading raw source — especially for large or
-    unfamiliar files.
-
-    The graph must be populated first via build_or_update_graph.
-
-    Args:
-        file_path: Relative path to the source file (forward slashes),
-                   e.g. "src/auth.py" or "berkelium_cli/store.py".
-        repo_root: Path to the repository root. Defaults to ".".
-
-    Returns:
-        Dict with keys:
-          - "file":    the queried file path
-          - "symbols": list of {name, qualified_name, kind, line_start, line_end}
-                       sorted by line_start (ascending)
-          - "summary": human-readable count string
-          - "error":   present only when something went wrong (results may be empty)
-    """
-    root = Path(repo_root).resolve()
-    if not root.exists():
-        return {
-            "file": file_path, "symbols": [], "summary": "",
-            "error": f"repo_root '{repo_root}' does not exist.",
-        }
-
-    db_path = root / ".berkelium" / "graph.db"
-
-    try:
-        store = GraphQLiteStore(str(db_path))
-    except RuntimeError as exc:
-        return {
-            "file": file_path, "symbols": [], "summary": "",
-            "error": f"Could not open graph store at '{db_path}': {exc}",
-        }
-
-    try:
-        nodes, _edges = store.get_file_data(file_path)
-
-        # Filter out the File-level container node — only return actual symbols
-        symbols = [
-            {
-                "name": n.name,
-                "qualified_name": n.qualified_name,
-                "kind": n.kind,
-                "line_start": n.line_start,
-                "line_end": n.line_end,
-            }
-            for n in nodes
-            if n.kind != "File"
-        ]
-        symbols.sort(key=lambda s: s["line_start"])
-
-        if not symbols and not any(n.kind == "File" for n in nodes):
-            summary = (
-                f"'{file_path}' was not found in the graph. "
-                "Run build_or_update_graph first, or check the file path."
-            )
-        else:
-            summary = f"Found {len(symbols)} symbol(s) in '{file_path}'."
-
-        return {"file": file_path, "symbols": symbols, "summary": summary}
-
-    except Exception as exc:
-        logger.exception("get_file_symbols failed for '%s'", file_path)
-        return {
-            "file": file_path, "symbols": [], "summary": "",
-            "error": f"Symbol lookup failed: {exc}",
-        }
-    finally:
-        store.close()
-
-
-# ---------------------------------------------------------------------------
-# Kind priority for search_symbols sorting (matches retriever._KIND_PRIORITY)
-# ---------------------------------------------------------------------------
-
-_KIND_PRIORITY: dict[str, int] = {
-    "Class":     0,
-    "Interface": 1,
-    "Function":  2,
-    "Method":    2,
-    "Test":      3,
-    "File":      4,
-}
-
-# Write-query keywords blocked by query_graph
-_WRITE_KEYWORDS = {"create", "set", "delete", "merge", "remove", "drop"}
-
-
-# ---------------------------------------------------------------------------
-# Tool 5: search_symbols
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-def search_symbols(
-    name: str,
-    repo_root: str = ".",
-    kind: str = "",
-    limit: int = 30,
-) -> dict:
-    """
-    Search for symbols (functions, classes, methods) by name across the codebase.
-
-    Performs a case-insensitive substring match against all symbol names in the
-    code graph.  Use this to locate where a function or class is defined before
-    calling get_file_symbols or get_structural_context on the containing file.
-
-    Typical workflow:
-      1. search_symbols("authenticate") → find which file defines it
-      2. get_file_symbols("src/auth.py") → see all symbols in that file
-      3. get_structural_context(["src/auth.py"]) → understand blast radius
-
-    The graph must be populated first via build_or_update_graph.
-
-    Args:
-        name:      Name fragment to search for (case-insensitive substring match),
-                   e.g. "authenticate", "User", "parse_token".
-        repo_root: Path to the repository root. Defaults to ".".
-        kind:      Optional filter — one of "Function", "Class", "Method",
-                   "Interface", "Test". Empty string returns all kinds. Default "".
-        limit:     Maximum number of results to return. Default 30.
-
-    Returns:
-        Dict with keys:
-          - "matches": list of {name, qualified_name, kind, line_start, line_end}
-                       sorted by kind priority then name (alphabetical)
-          - "total":   total number of matches before the limit was applied
-          - "summary": human-readable count string
-          - "error":   present only when something went wrong
-    """
-    if not name or not name.strip():
-        return {
-            "matches": [], "total": 0,
-            "summary": "Provide a non-empty name fragment to search for.",
-        }
-
-    root = Path(repo_root).resolve()
-    if not root.exists():
-        return {
-            "matches": [], "total": 0, "summary": "",
-            "error": f"repo_root '{repo_root}' does not exist.",
-        }
-
-    db_path = root / ".berkelium" / "graph.db"
-
-    try:
-        store = GraphQLiteStore(str(db_path))
-    except RuntimeError as exc:
-        return {
-            "matches": [], "total": 0, "summary": "",
-            "error": f"Could not open graph store at '{db_path}': {exc}",
-        }
-
-    try:
-        if store.stats().get("node_count", 0) == 0:
-            return {
-                "matches": [], "total": 0,
-                "summary": "Graph is empty — run build_or_update_graph first.",
-            }
-
-        nodes = store.get_all_nodes(exclude_external=True)
-
-        needle = name.strip().lower()
-        matched = [n for n in nodes if needle in n.name.lower() and n.kind != "File"]
-
-        if kind:
-            matched = [n for n in matched if n.kind == kind]
-
-        matched.sort(key=lambda n: (_KIND_PRIORITY.get(n.kind, 99), n.name.lower()))
-
-        total = len(matched)
-        matched = matched[:limit]
-
-        results = [
-            {
-                "name": n.name,
-                "qualified_name": n.qualified_name,
-                "kind": n.kind,
-                "line_start": n.line_start,
-                "line_end": n.line_end,
-            }
-            for n in matched
-        ]
-
-        summary = f"Found {total} match(es) for '{name.strip()}'"
-        if kind:
-            summary += f" (kind={kind})"
-        if total > limit:
-            summary += f" — showing first {limit}"
-        summary += "."
-
-        return {"matches": results, "total": total, "summary": summary}
-
-    except Exception as exc:
-        logger.exception("search_symbols failed for name='%s'", name)
-        return {
-            "matches": [], "total": 0, "summary": "",
-            "error": f"Symbol search failed: {exc}",
-        }
-    finally:
-        store.close()
-
-
-# ---------------------------------------------------------------------------
-# Tool 6: query_graph
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-def query_graph(
+def query_code_call_graph(
     cypher: str,
     repo_root: str = ".",
 ) -> dict:
     """
-    Run a read-only Cypher query directly against the code knowledge graph.
+    Use this tool to find relationships between functions, callers, and callees
+    in the codebase. Input must be a valid Cypher query.
 
-    Use this when the higher-level tools (search_symbols, get_file_symbols,
-    get_structural_context) cannot answer your question.  Results depend
-    entirely on what your RETURN clause specifies.
-
-    Write operations (CREATE, SET, DELETE, MERGE, REMOVE, DROP) are blocked.
+    Use this when analyze_impact_radius cannot answer your question — for example,
+    to find all classes in a module, trace a specific call chain, or count symbols
+    by kind. Write operations (CREATE, SET, DELETE, MERGE, REMOVE, DROP) are blocked.
 
     Node schema — properties on every non-External node:
       name            str   Short symbol name, e.g. "authenticate"
@@ -588,7 +400,7 @@ def query_graph(
 
     Edge schema:
       CALLS      (caller)-[:CALLS]->(callee)   function call relationships
-      CONTAINS   (file)-[:CONTAINS]->(symbol)  symbol belongs to file
+      CONTAINS   (file)-[:CONTAINS]->(symbol)  symbol belongs to a file
       INHERITS   (child)-[:INHERITS]->(parent) class inheritance
 
     Example queries:
@@ -599,7 +411,8 @@ def query_graph(
     The graph must be populated first via build_or_update_graph.
 
     Args:
-        cypher:    A read-only Cypher query string (must contain RETURN).
+        cypher:    A read-only Cypher query string. Must contain a RETURN clause.
+                   Write keywords (CREATE, SET, DELETE, MERGE, REMOVE, DROP) are rejected.
         repo_root: Path to the repository root. Defaults to ".".
 
     Returns:
@@ -609,46 +422,82 @@ def query_graph(
           - "summary": human-readable summary
           - "error":   present only when something went wrong
     """
+    # --- Validate query -----------------------------------------------------
     if not cypher or not cypher.strip():
         return {
             "rows": [], "count": 0, "summary": "",
-            "error": "cypher query cannot be empty.",
+            "error": (
+                "cypher query cannot be empty. "
+                "Provide a valid MATCH ... RETURN ... Cypher query."
+            ),
         }
 
-    first_word = cypher.strip().split()[0].lower()
+    stripped = cypher.strip()
+    first_word = stripped.split()[0].lower()
+
     if first_word in _WRITE_KEYWORDS:
         return {
             "rows": [], "count": 0, "summary": "",
             "error": (
-                f"Write queries are not allowed (detected '{first_word.upper()}')."
-                " Use read-only Cypher — MATCH ... RETURN ..."
+                f"Write queries are not allowed (detected '{first_word.upper()}' "
+                "as the first keyword). Use read-only Cypher — MATCH ... RETURN ..."
             ),
         }
 
     if "return" not in cypher.lower():
         return {
             "rows": [], "count": 0, "summary": "",
-            "error": "Query must include a RETURN clause.",
+            "error": (
+                "Query must include a RETURN clause. "
+                "Example: MATCH (n) WHERE n.kind = 'Function' RETURN n.name, n.file_rel_path"
+            ),
         }
 
+    # --- Validate repo_root -------------------------------------------------
     root = Path(repo_root).resolve()
     if not root.exists():
         return {
             "rows": [], "count": 0, "summary": "",
-            "error": f"repo_root '{repo_root}' does not exist.",
+            "error": (
+                f"repo_root '{repo_root}' does not exist. "
+                "Provide an absolute path or a path relative to the current "
+                "working directory."
+            ),
+        }
+    if not root.is_dir():
+        return {
+            "rows": [], "count": 0, "summary": "",
+            "error": (
+                f"repo_root '{repo_root}' is a file, not a directory. "
+                "Provide the path to the repository root directory."
+            ),
         }
 
     db_path = root / ".berkelium" / "graph.db"
 
+    # --- Open graph store ---------------------------------------------------
     try:
         store = GraphQLiteStore(str(db_path))
     except RuntimeError as exc:
         return {
             "rows": [], "count": 0, "summary": "",
-            "error": f"Could not open graph store at '{db_path}': {exc}",
+            "error": (
+                f"Could not open graph store at '{db_path}': {exc}. "
+                "Run build_or_update_graph first to initialise the graph."
+            ),
         }
 
     try:
+        # --- Guard: empty graph ---------------------------------------------
+        if store.stats().get("node_count", 0) == 0:
+            return {
+                "rows": [], "count": 0,
+                "summary": "",
+                "error": (
+                    "Graph is empty — run build_or_update_graph first, then retry."
+                ),
+            }
+
         rows = store.query(cypher)
         count = len(rows)
         return {
@@ -656,11 +505,16 @@ def query_graph(
             "count": count,
             "summary": f"Query returned {count} row(s).",
         }
+
     except Exception as exc:
-        logger.exception("query_graph failed for cypher: %s", cypher[:120])
+        logger.exception("query_code_call_graph failed for cypher: %s", cypher[:200])
         return {
             "rows": [], "count": 0, "summary": "",
-            "error": f"Query failed: {exc}",
+            "error": (
+                f"Query failed: {exc}. "
+                "Check your Cypher syntax — properties must be accessed as n.property_name, "
+                "and edge types must be uppercase (e.g. [:CALLS], [:CONTAINS], [:INHERITS])."
+            ),
         }
     finally:
         store.close()
@@ -684,10 +538,10 @@ def review_my_pr() -> str:
         "the graph reflects the latest code on disk.\n"
         "2. Run the shell command: git diff --name-only HEAD\n"
         "   to get the list of files I have changed.\n"
-        "3. Call get_impact_radius with those changed files to discover upstream "
-        "callers and downstream dependencies.\n"
+        "3. Call analyze_impact_radius with those changed files to discover all upstream "
+        "callers and downstream dependencies before reviewing the changes.\n"
         "4. Based on the impacted symbols found, suggest specific test cases that "
-        "should be run or written to validate correctness after my changes."
+        "should be run or written to validate correctness after the changes."
     )
 
 
