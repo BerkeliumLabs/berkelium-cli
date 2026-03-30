@@ -529,7 +529,13 @@ class GraphQLiteStore:
         """
         try:
             return list(self._graph.query(cypher, params=params or {}))
-        except Exception as exc:
+        except (KeyboardInterrupt, GeneratorExit):
+            raise  # let these propagate normally
+        except BaseException as exc:
+            # Catch BaseException (not just Exception) because the underlying
+            # graphqlite Cypher parser is a native DLL that can raise SystemExit
+            # on certain syntax errors.  Swallowing SystemExit here prevents the
+            # MCP server process from dying due to a bad user query.
             logger.warning("Cypher query failed: %s", exc)
             return []
 
