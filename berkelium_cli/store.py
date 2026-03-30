@@ -31,6 +31,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class QueryError(RuntimeError):
+    """Raised by GraphQLiteStore.query() when a Cypher query fails."""
+
+
 # ---------------------------------------------------------------------------
 # Module-level helpers (free functions used by the class)
 # ---------------------------------------------------------------------------
@@ -534,10 +538,10 @@ class GraphQLiteStore:
         except BaseException as exc:
             # Catch BaseException (not just Exception) because the underlying
             # graphqlite Cypher parser is a native DLL that can raise SystemExit
-            # on certain syntax errors.  Swallowing SystemExit here prevents the
-            # MCP server process from dying due to a bad user query.
-            logger.warning("Cypher query failed: %s", exc)
-            return []
+            # on certain syntax errors.  Catching it here prevents process death;
+            # re-raising as QueryError gives callers an actionable signal instead
+            # of silently returning [] (which looks like a valid empty result).
+            raise QueryError(f"Cypher query failed: {exc}") from None
 
     # ------------------------------------------------------------------
     # Graph algorithms
